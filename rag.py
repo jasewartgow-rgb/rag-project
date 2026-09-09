@@ -17,55 +17,67 @@ enough information to answer, say so. Quote or paraphrase the source text \
 where helpful. Note that the text is OCR'd and may contain garbled characters."""
 
 
-def retrieve(query: str, k: int = TOP_K) -> list[str]:
-    model = SentenceTransformer(EMBED_MODEL)
-    query_vec = model.encode(query).tolist()
+class RAG:
+    def __init__(self):
+        load_dotenv()
+        print(f"Loading embedding model ({EMBED_MODEL})...")
+        self.embed_model = SentenceTransformer(EMBED_MODEL)
+        chroma = chromadb.PersistentClient(path=CHROMA_DIR)
+        self.collection = chroma.get_collection(COLLECTION_NAME)
+        self.claude = anthropic.Anthropic()
+        print(f"Ready — {self.collection.count()} chunks indexed.\n")
 
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
-    collection = client.get_collection(COLLECTION_NAME)
+    def retrieve(self, query: str) -> list[str]:
+        vec = self.embed_model.encode(query).tolist()
+        results = self.collection.query(
+            query_embeddings=[vec],
+            n_results=TOP_K,
+            include=["documents"],
+        )
+        return results["documents"][0]
 
-    results = collection.query(
-        query_embeddings=[query_vec],
-        n_results=k,
-        include=["documents"],
-    )
-    return results["documents"][0]
+    def ask(self, question: str) -> None:
+        chunks = self.retrieve(question)
+        context = "\n\n---\n\n".join(
+            f"Excerpt {i + 1}:\n{chunk}" for i, chunk in enumerate(chunks)
+        )
 
+        print("\nAnswer:")
+        with self.claude.messages.stream(
+            model="claude-opus-4-7",
+            max_tokens=1024,
+            system=SYSTEM_PROMPT,
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"Here are relevant excerpts from the book:\n\n{context}\n\nQuestion: {question}",
+                }
+            ],
+        ) as stream:
+            for text in stream.text_stream:
+                print(text, end="", flush=True)
+        print("\n")
 
-def answer(question: str) -> None:
-    load_dotenv()
-
-    print("Retrieving relevant excerpts...")
-    chunks = retrieve(question)
-
-    context = "\n\n---\n\n".join(
-        f"Excerpt {i + 1}:\n{chunk}" for i, chunk in enumerate(chunks)
-    )
-
-    client = anthropic.Anthropic()
-
-    print(f'\nQuestion: "{question}"\n')
-    print("Answer:")
-
-    with client.messages.stream(
-        model="claude-opus-4-7",
-        max_tokens=1024,
-        system=SYSTEM_PROMPT,
-        messages=[
-            {
-                "role": "user",
-                "content": f"Here are relevant excerpts from the book:\n\n{context}\n\nQuestion: {question}",
-            }
-        ],
-    ) as stream:
-        for text in stream.text_stream:
-            print(text, end="", flush=True)
-
-    print()
+    def chat(self) -> None:
+        print("Ask anything about Jerry Thomas's 1862 Bar-Tender's Guide.")
+        print("Type 'quit' or press Ctrl+C to exit.\n")
+        while True:
+            try:
+                question = input("You: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\nGoodnight.")
+                break
+            if not question:
+                continue
+            if question.lower() in {"quit", "exit", "q"}:
+                print("Goodnight.")
+                break
+            self.ask(question)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python rag.py \"your question here\"")
-        sys.exit(1)
-    answer(" ".join(sys.argv[1:]))
+    rag = RAG()
+    if len(sys.argv) > 1:
+        rag.ask(" ".join(sys.argv[1:]))
+    else:
+        rag.chat()
